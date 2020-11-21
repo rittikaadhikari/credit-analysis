@@ -1,7 +1,7 @@
 ---
-title: "Title of Analysis Goes Here"
-author: "Your Name (netid@illinois.edu)"
-date: "Insert Date Here"
+title: "Credit Fraud Analysis"
+author: "Rittika Adhikari (rittika2@illinois.edu)"
+date: "Wednesday, November 18, 2020"
 output:
   html_document: 
     theme: default
@@ -14,6 +14,10 @@ knitr::opts_chunk$set(echo = FALSE, fig.align = 'center')
 
 ```{r, load-packages, include = FALSE}
 # load packages
+library("tidyverse")
+library("caret")
+library("mlr")
+library("pROC")
 ```
 
 ```{r make-data, warning = FALSE, message = FALSE}
@@ -21,56 +25,194 @@ knitr::opts_chunk$set(echo = FALSE, fig.align = 'center')
 source("make-data.R")
 ```
 
-```{r read-full-data, warning = FALSE, message = FALSE}
-# read full data
-cc = data.table::fread("data/cc.csv.gz")
-```
-
 ```{r read-subset-data, warning = FALSE, message = FALSE}
 # read subset of data
-cc_sub = data.table::fread("data/cc-sub.csv")
+cc = read_csv("data/cc-sub.csv")
+
+# feature engineering
+cc$Class = factor(as.numeric(factor(cc$Class))) # 1 -> fraud, 2 -> genuine
 ```
 
 ***
 
 ## Abstract
 
-> Abstract text goes here.
+Successfully automating the detection of fraudulent credit card transactions is an ongoing machine learning project. Banks and credit card companies from all around want ways to easily automate these checks, in order to save billions of dollars on fraud. In this analysis, I utilize Kaggle's Credit Card Fraud Detection dataset to build a Stochastic Gradient Boosting model to precisely determine whether a transaction is fraudulent or not. I utilize oversampling to reduce the class imbalance, and I ensure that the false negative rate in my confusion matrix is low, while my AUC and accuracy is high.
 
 ***
 
 ## Introduction
 
-Write your introduction here.
+Credit card fraud is rapidly increasing in frequency - from just 2015 to 2020, the frequency of credit card reports has increased by 161.7%. Additionally, retailers incur $580.5M in debit card fraud losses, and spend an additional $6.47B annually on credit & debit card fraud prevention annually. Thus, is is crucial that credit card companies are able to recognize fradulent credit card transactions, so that customers are not falsely charged for items they did not purchase. In this analysis, I consider Kaggle's Credit Card Fraud Detection dataset to build a model to precisely determine whether or not a transaction is fradulent, based on a series of anonymized features.
 
 ***
 
 ## Methods
 
-Describe the methods used in this section.
+I tackled this problem by first observing the data, and rebalancing the dataset based on the classes (genuine vs. fraudulent). Then, I experimented with a variety of different modeling techniques with the rebalanced dataset in order to determine the best technique for this problem. Once I settled on a model, I tuned the parameters and evaluated it on a estimation-validation split, and then a train-test split. 
 
 ### Data
 
-Specifically describe the data and how it is used here.
+The Kaggle Credit Card Fraud Detection Dataset major attributes can be described as follows: 
+* `V1-V28` - numeric variables obtained from PCA
+* `Time` - seconds elapsed between transaction and the first transaction in the dataset
+* `Amount` - the transaction amount
+* `Class` - "genuine" [2] or "fraud" [1]
+
+One thing to note is that the features `V1-V28` are not explicitly identified - these were just anonymized features extracted using PCA. Thus, it is hard to do any true feature engineering on this dataset, as most of the variables' true meanings are hidden to us.
+
+The response variable we are aiming to predict is `Class`, which indicates whether a transaction is "genuine" or "fraud[ulent]". For the purpose of this analysis, I converted this variable to be numeric, such that 1 represents a "fraud", and 2 represents a "genuine" transaction.
+
+While observing the data, I noticed that there are significantly more "genuine" transactions than there are "fraud[ulent]" ones. 
+
+```{r, knit = TRUE}
+classes = table(cc$Class)
+print(classes)
+```
+
+As can be seen from the above table, there are only 15 "fraud[ulent]" transactions, as opposed to the 9985 "genuine" transactions. In order to address this class imbalance, there were two approaches I considered - oversampling or undersampling. In oversampling, I utilize a technique known as SMOTE to create a synthetic example within the feature space between a nearest neighbor and the point I'm trying to mimic. I would oversample the "fraud" class to restore its balance with the "genuine" class. On the other hand, with undersampling, I would just randomly select a subset of the "genuine" class to make it closer in size to that of the "fraud" class. From a technical perspective, it made more sense to utilize oversampling, since it is more difficult to build a model with 30 samples than it is to build one with 18K samples. 
+
+```{r, echo = TRUE, results = "hide", warning = FALSE}
+# make a classification task
+task = makeClassifTask(data = cc, target = "Class")
+
+# oversample data [fraud]
+oversampling_rate = ceiling(classes[2] / classes[1])
+oversample_data = getTaskData(smote(task, oversampling_rate, nn = 10))
+
+# print table of class proportions
+table(oversample_data$Class)
+```
 
 ### Modeling
 
-Discuss your modeling and validation strategy here.
+For my models, I decided to skip the step of establishing a simple baseline, as it is already evident that always predicting "genuine" would not adequately solve the issue at hand. Instead, I jumped right into comparing decision trees, KNN, and Stochastic Gradient Boosting with cross validation.
+
+```{r, echo = FALSE}
+# split into train-test
+set.seed(42)
+trn_idx = createDataPartition(oversample_data$Class, p = 0.80, list = TRUE)
+trn = oversample_data[trn_idx$Resample1, ]
+tst = oversample_data[-trn_idx$Resample1, ]
+```
+
+```{r, echo = TRUE}
+# train models
+cv_5 = trainControl(method = "cv", number = 5)
+tree_mod = caret::train(form = Class ~ ., data = trn, method = "rpart", trControl = cv_5)
+knn_mod = caret::train(form = Class ~ ., data = trn, method = "knn", trControl = cv_5)
+gbm_mod = caret::train(form = Class ~ ., data = trn, method = "gbm", trControl = cv_5, verbose = FALSE)
+```
 
 ***
 
 ## Results
 
-State your results here.
+As can be seen from the below accuracies and AUCs, Stochastic Gradient Boosting and Decision Trees tied for the best possible model. I chose to go with training a Stochastic Gradient Boosting algorithm with `n.trees = 50`, `interaction.depth = 2`, `shrinkage = 0.1`, and `n.minobsinnode = 10` with cross validation of 5 folds.
+
+```{r, echo = TRUE, warning = FALSE, message = FALSE}
+# predict test
+tree_preds = predict(tree_mod, newdata = tst, type = "raw")
+knn_preds = predict(knn_mod, newdata = tst, type = "raw")
+gbm_preds = predict(gbm_mod, newdata = tst, type = "raw")
+
+# calculate test accuracy
+mean(tree_preds == tst$Class) # tree
+mean(knn_preds == tst$Class) # knn
+mean(gbm_preds == tst$Class) # gbm
+
+# calculate test AUC
+auc(as.numeric(tst$Class), as.numeric(tree_preds)) # tree
+auc(as.numeric(tst$Class), as.numeric(knn_preds)) # knn
+auc(as.numeric(tst$Class), as.numeric(gbm_preds)) # gbm
+```
 
 ***
 
 ## Discussion
 
-Discuss your results here.
+This model performed significantly well, with an accuracy of around 99.97% and an AUC of 0.9997. 
+
+```{r, knit = TRUE}
+confusionMatrix(gbm_preds, tst$Class)
+```
+
+Additionally, as can be seen from the confusion matrix above, it has no false negatives and only one false positive. In this situation, false negatives occur when a "genuine" transaction is misclassified as "fraud[ulent]", whereas false positives occur when a "fraud[ulent]" transaction is misclassified as "genuine". False positives are more dangerous, as these could be catastrophically expensive to credit card companies. On the flip side, false negatives are less concerning; they're still annoying to deal with, but they aren't as much of a financial burden.
 
 ***
 
 ## Appendix
+Below is all the code I utilized to construct my analysis. 
 
-Place potential additional information here.
+```{r, eval = FALSE, echo = TRUE}
+
+# load packages
+library("tidyverse")
+library("caret")
+library("mlr")
+library("pROC")
+
+# read in the data
+cc = read_csv("data/cc-sub.csv")
+
+# feature engineering
+cc$Class = factor(as.numeric(factor(cc$Class))) # 1 -> fraud, 2 -> genuine
+
+# function to determine proportion of NAs in a vector
+na_prop = function(x) {
+  mean(is.na(x))
+}
+
+# check proportion of NAs in each column
+print(sapply(cc, na_prop)) # no NAs
+
+# get ratio of classes
+classes = table(cc$Class)
+print(classes) # accuracy is a bad metric; need to balance data
+
+# make a classification task
+task = makeClassifTask(data = cc, target = "Class")
+
+###### OVERSAMPLE ######
+print("OVERSAMPLE TEST")
+
+# oversample data [fraud]
+oversampling_rate = ceiling(classes[2] / classes[1])
+oversample_data = getTaskData(smote(task, oversampling_rate, nn = 10))
+print(table(oversample_data$Class))
+
+# split into train-test
+set.seed(42)
+trn_idx = createDataPartition(oversample_data$Class, p = 0.80, list = TRUE)
+trn = oversample_data[trn_idx$Resample1, ]
+tst = oversample_data[-trn_idx$Resample1, ]
+
+# train models
+cv_5 = trainControl(method = "cv", number = 5)
+tree_mod = caret::train(form = Class ~ ., data = trn, method = "rpart", trControl = cv_5)
+print(tree_mod)
+knn_mod = caret::train(form = Class ~ ., data = trn, method = "knn", trControl = cv_5)
+print(knn_mod)
+gbm_mod = caret::train(form = Class ~ ., data = trn, method = "gbm", trControl = cv_5, verbose = FALSE)
+print(gbm_mod)
+
+# calculate test accuracy
+print("ACCURACIES:")
+tree_preds = predict(tree_mod, newdata = tst, type = "raw")
+print(mean(tree_preds == tst$Class)) # tree
+
+knn_preds = predict(knn_mod, newdata = tst, type = "raw")
+print(mean(knn_preds == tst$Class)) # knn
+
+gbm_preds = predict(gbm_mod, newdata = tst, type = "raw")
+print(mean(gbm_preds == tst$Class)) # gbm
+
+# calculate test AUC
+print("AUCs:")
+print(auc(as.numeric(tst$Class), as.numeric(tree_preds))) # tree
+print(auc(as.numeric(tst$Class), as.numeric(knn_preds))) # knn
+print(auc(as.numeric(tst$Class), as.numeric(gbm_preds))) # gbm
+
+# print confusion matrix of best model
+confusionMatrix(gbm_preds, tst$Class)
+```
